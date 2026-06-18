@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "LocationTracker",
+    "slug": "location-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F0F1E"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourname.locationtracker",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to track your path on the map.",
+        "NSLocationAlwaysUsageDescription": "This app uses your location to track your path on the map."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F0F1E"
+      },
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ],
+      "package": "com.yourname.locationtracker"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Location Tracker to use your location to track your path."
+        }
+      ]
+    ]
+  }
+}
