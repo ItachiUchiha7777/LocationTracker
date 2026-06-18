@@ -72,8 +72,8 @@ const useLocation = () => {
       (location) => {
         const { latitude, longitude, altitude, speed, accuracy } = location.coords;
 
-        // 1. Accuracy Filter: reject points with accuracy worse than 20 meters
-        if (accuracy && accuracy > 20) {
+        // 1. Accuracy Filter: reject points with accuracy worse than 35 meters (to allow indoor/simulator testing)
+        if (accuracy && accuracy > 35) {
           return;
         }
 
@@ -130,7 +130,7 @@ const useLocation = () => {
           );
         }
 
-        const MIN_MOVEMENT_METERS = 4;
+        const MIN_MOVEMENT_METERS = 2.5;
 
         if (distanceDelta >= MIN_MOVEMENT_METERS) {
           setCurrentLocation({
