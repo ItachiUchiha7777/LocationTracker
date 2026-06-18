@@ -56,7 +56,7 @@ export const calculateDistance = (coordinates) => {
 };
 
 // Haversine formula to calculate distance between two lat/lng points in meters
-const haversine = (lat1, lon1, lat2, lon2) => {
+export const haversine = (lat1, lon1, lat2, lon2) => {
   const R = 6371000; // Earth's radius in meters
   const toRad = (deg) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
