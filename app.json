@@ -40,6 +40,11 @@
           "locationAlwaysAndWhenInUsePermission": "Allow Location Tracker to use your location to track your path."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a8eaf1eb-600f-400f-9506-2c0838f9d57d"
+      }
+    }
   }
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import { saveRoute, calculateDistance, haversine } from '../utils/storage';
 import { KalmanFilter } from '../utils/KalmanFilter';
@@ -47,6 +48,158 @@ const useLocation = () => {
     }
   };
 
+  // Keep isTrackingRef in sync with isTracking state to avoid AppState listener re-registrations
+  const isTrackingRef = useRef(false);
+  useEffect(() => {
+    isTrackingRef.current = isTracking;
+  }, [isTracking]);
+
+  // Helper to start the native watchPositionAsync subscription
+  const startWatching = useCallback(async () => {
+    if (locationSubscription.current || permissionStatus !== 'granted') return;
+
+    try {
+      locationSubscription.current = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.BestForNavigation,
+          timeInterval: 2000,      // Update every 2 seconds
+          distanceInterval: 5,      // Or every 5 meters
+        },
+        (location) => {
+          const { latitude, longitude, altitude, speed, accuracy } = location.coords;
+
+          // 1. Accuracy Filter: reject points with accuracy worse than 35 meters (to allow indoor/simulator testing)
+          if (accuracy && accuracy > 35) {
+            return;
+          }
+
+          // Initialize Kalman filters on first valid point
+          if (!referenceLocationRef.current) {
+            referenceLocationRef.current = { latitude, longitude };
+            // Initialize with 1.5 process noise, and accuracy^2 measurement noise
+            const initialR = (accuracy || 8) ** 2;
+            kalmanXRef.current = new KalmanFilter(1.5, initialR);
+            kalmanYRef.current = new KalmanFilter(1.5, initialR);
+
+            const initialPoint = { latitude, longitude };
+            setCurrentLocation({ latitude, longitude, altitude, speed });
+            setPathCoordinates([initialPoint]);
+            lastAcceptedCoordRef.current = initialPoint;
+            return;
+          }
+
+          // Project raw coordinate to flat metric plane relative to start point
+          const R_EARTH = 6371000;
+          const lat0 = referenceLocationRef.current.latitude;
+          const lng0 = referenceLocationRef.current.longitude;
+          
+          const degToRad = Math.PI / 180;
+          const yRaw = (latitude - lat0) * degToRad * R_EARTH;
+          const xRaw = (longitude - lng0) * degToRad * R_EARTH * Math.cos(lat0 * degToRad);
+
+          // Calculate dynamic process noise (Q) based on speed to adjust responsiveness
+          // For stationary/slow user, Q is small (1.5) for high smoothing.
+          // For running/riding user, Q increases to reduce lag.
+          const dynamicQ = Math.max(1.5, (speed || 0) ** 2 * 2);
+          const currentR = (accuracy || 8) ** 2;
+
+          kalmanXRef.current.Q = dynamicQ;
+          kalmanYRef.current.Q = dynamicQ;
+
+          // Apply Kalman filter
+          const xFiltered = kalmanXRef.current.filter(xRaw, currentR);
+          const yFiltered = kalmanYRef.current.filter(yRaw, currentR);
+
+          // Convert metric coords back to Latitude and Longitude
+          const filteredLatitude = lat0 + yFiltered / (R_EARTH * degToRad);
+          const filteredLongitude = lng0 + xFiltered / (R_EARTH * degToRad * Math.cos(lat0 * degToRad));
+          const filteredPoint = { latitude: filteredLatitude, longitude: filteredLongitude };
+
+          // 2. Minimum Distance Threshold (2.5 meters)
+          let distanceDelta = 0;
+          if (lastAcceptedCoordRef.current) {
+            distanceDelta = haversine(
+              lastAcceptedCoordRef.current.latitude,
+              lastAcceptedCoordRef.current.longitude,
+              filteredLatitude,
+              filteredLongitude
+            );
+          }
+
+          const MIN_MOVEMENT_METERS = 2.5;
+
+          if (distanceDelta >= MIN_MOVEMENT_METERS) {
+            setCurrentLocation({
+              latitude: filteredLatitude,
+              longitude: filteredLongitude,
+              altitude,
+              speed
+            });
+
+            setPathCoordinates((prev) => {
+              const updated = [...prev, filteredPoint];
+              setTotalDistance(calculateDistance(updated));
+              return updated;
+            });
+
+            lastAcceptedCoordRef.current = filteredPoint;
+          } else {
+            // If we haven't moved enough, update the current position for map visual smoothness
+            // but do NOT append to coordinates or count in total distance.
+            setCurrentLocation({
+              latitude: filteredLatitude,
+              longitude: filteredLongitude,
+              altitude,
+              speed
+            });
+          }
+        }
+      );
+    } catch (error) {
+      console.error('Error starting location watch:', error);
+    }
+  }, [permissionStatus]);
+
+  // Pause location updates when app goes to background
+  const onPause = useCallback(() => {
+    if (isTrackingRef.current && locationSubscription.current) {
+      locationSubscription.current.remove();
+      locationSubscription.current = null;
+      console.log('Location tracking paused (app backgrounded)');
+    }
+  }, []);
+
+  // Resume location updates when app comes to foreground
+  const onResume = useCallback(async () => {
+    if (isTrackingRef.current && !locationSubscription.current) {
+      console.log('Location tracking resumed (app foregrounded)');
+      await startWatching();
+    }
+  }, [startWatching]);
+
+  // Listen to AppState changes (foreground/background) to prevent background SecurityExceptions
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (
+        appState.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        onResume();
+      } else if (
+        appState.current === 'active' &&
+        nextAppState.match(/inactive|background/)
+      ) {
+        onPause();
+      }
+      appState.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [onPause, onResume]);
+
   // Start real-time location tracking
   const startTracking = useCallback(async () => {
     if (isTracking || permissionStatus !== 'granted') return;
@@ -62,104 +215,8 @@ const useLocation = () => {
     kalmanYRef.current = null;
     lastAcceptedCoordRef.current = null;
 
-    // Watch position with high accuracy
-    locationSubscription.current = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 2000,      // Update every 2 seconds
-        distanceInterval: 5,      // Or every 5 meters
-      },
-      (location) => {
-        const { latitude, longitude, altitude, speed, accuracy } = location.coords;
-
-        // 1. Accuracy Filter: reject points with accuracy worse than 35 meters (to allow indoor/simulator testing)
-        if (accuracy && accuracy > 35) {
-          return;
-        }
-
-        // Initialize Kalman filters on first valid point
-        if (!referenceLocationRef.current) {
-          referenceLocationRef.current = { latitude, longitude };
-          // Initialize with 1.5 process noise, and accuracy^2 measurement noise
-          const initialR = (accuracy || 8) ** 2;
-          kalmanXRef.current = new KalmanFilter(1.5, initialR);
-          kalmanYRef.current = new KalmanFilter(1.5, initialR);
-
-          const initialPoint = { latitude, longitude };
-          setCurrentLocation({ latitude, longitude, altitude, speed });
-          setPathCoordinates([initialPoint]);
-          lastAcceptedCoordRef.current = initialPoint;
-          return;
-        }
-
-        // Project raw coordinate to flat metric plane relative to start point
-        const R_EARTH = 6371000;
-        const lat0 = referenceLocationRef.current.latitude;
-        const lng0 = referenceLocationRef.current.longitude;
-        
-        const degToRad = Math.PI / 180;
-        const yRaw = (latitude - lat0) * degToRad * R_EARTH;
-        const xRaw = (longitude - lng0) * degToRad * R_EARTH * Math.cos(lat0 * degToRad);
-
-        // Calculate dynamic process noise (Q) based on speed to adjust responsiveness
-        // For stationary/slow user, Q is small (1.5) for high smoothing.
-        // For running/riding user, Q increases to reduce lag.
-        const dynamicQ = Math.max(1.5, (speed || 0) ** 2 * 2);
-        const currentR = (accuracy || 8) ** 2;
-
-        kalmanXRef.current.Q = dynamicQ;
-        kalmanYRef.current.Q = dynamicQ;
-
-        // Apply Kalman filter
-        const xFiltered = kalmanXRef.current.filter(xRaw, currentR);
-        const yFiltered = kalmanYRef.current.filter(yRaw, currentR);
-
-        // Convert metric coords back to Latitude and Longitude
-        const filteredLatitude = lat0 + yFiltered / (R_EARTH * degToRad);
-        const filteredLongitude = lng0 + xFiltered / (R_EARTH * degToRad * Math.cos(lat0 * degToRad));
-        const filteredPoint = { latitude: filteredLatitude, longitude: filteredLongitude };
-
-        // 2. Minimum Distance Threshold (4 meters)
-        let distanceDelta = 0;
-        if (lastAcceptedCoordRef.current) {
-          distanceDelta = haversine(
-            lastAcceptedCoordRef.current.latitude,
-            lastAcceptedCoordRef.current.longitude,
-            filteredLatitude,
-            filteredLongitude
-          );
-        }
-
-        const MIN_MOVEMENT_METERS = 2.5;
-
-        if (distanceDelta >= MIN_MOVEMENT_METERS) {
-          setCurrentLocation({
-            latitude: filteredLatitude,
-            longitude: filteredLongitude,
-            altitude,
-            speed
-          });
-
-          setPathCoordinates((prev) => {
-            const updated = [...prev, filteredPoint];
-            setTotalDistance(calculateDistance(updated));
-            return updated;
-          });
-
-          lastAcceptedCoordRef.current = filteredPoint;
-        } else {
-          // If we haven't moved enough, update the current position for map visual smoothness
-          // but do NOT append to coordinates or count in total distance.
-          setCurrentLocation({
-            latitude: filteredLatitude,
-            longitude: filteredLongitude,
-            altitude,
-            speed
-          });
-        }
-      }
-    );
-  }, [isTracking, permissionStatus]);
+    await startWatching();
+  }, [isTracking, permissionStatus, startWatching]);
 
   // Stop tracking and save the session
   const stopTracking = useCallback(async () => {
